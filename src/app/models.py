@@ -35,8 +35,16 @@ class APIKey(models.Model):
 
     @property
     def secret_key(self):
-        cipher_suite = Fernet(settings.ENCRYPTION_KEY)
-        return cipher_suite.decrypt(self._secret_key).decode()
+        try:
+            secret_data = self._secret_key
+            if hasattr(secret_data, 'tobytes'):
+                secret_data = secret_data.tobytes()
+
+            cipher_suite = Fernet(settings.ENCRYPTION_KEY)
+            decrypted = cipher_suite.decrypt(secret_data)
+            return decrypted.decode()
+        except Exception as e:
+            raise e
 
     @secret_key.setter
     def secret_key(self, value):
