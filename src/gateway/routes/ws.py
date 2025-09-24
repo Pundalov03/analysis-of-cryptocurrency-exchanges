@@ -1,11 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
 from ..services.binance_ws import BinanceWebsocket
 
 router = APIRouter()
 active_connections = {}
 
 @router.post('/users/{user_id}/exchanges/binance/ws/start/')
-async def start_websocket(user_id: int, api_keys: dict):
+async def start_websocket(user_id: int, api_keys: dict = Body(), trades: list = Body()):
     try:
         if user_id in active_connections:
             await active_connections[user_id].disconnect()
@@ -14,6 +14,7 @@ async def start_websocket(user_id: int, api_keys: dict):
             user_id=user_id,
             api_key=api_keys.get('api_key'),
             secret_key=api_keys.get('secret_key'),
+            trades=trades,
             testnet=True
         )
         await ws_binance.connect()

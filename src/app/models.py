@@ -58,10 +58,10 @@ class Trade(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     exchange = models.ForeignKey(Exchange, on_delete=models.CASCADE)
     symbol = models.CharField(max_length=20)
-    quantity = models.DecimalField(decimal_places=8, max_digits=20)
-    buy_price = models.DecimalField(decimal_places=8, max_digits=20)
-    sell_price = models.DecimalField(decimal_places=8, max_digits=20)
-    estimated_profit = models.DecimalField(decimal_places=8, max_digits=20)
+    quantity = models.FloatField()
+    buy_price = models.FloatField()
+    sell_price = models.FloatField(null=True)
+    estimated_profit = models.FloatField(null=True)
 
     detected_at = models.DateTimeField(auto_now_add=True)
 

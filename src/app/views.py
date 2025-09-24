@@ -1,4 +1,5 @@
 from django.contrib.auth import authenticate
+from django.db.models import Avg
 from django.http import HttpResponse
 import requests
 from rest_framework import status
@@ -7,7 +8,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 
-from .models import APIKey, Exchange
+from .models import APIKey, Exchange, Trade
 from .serializers import UserRegisterSerializer, UserLoginSerializer, ExchangeSerializer, APIKeySerializer
 
 HOST_FAST_API = 'http://localhost:8002'
@@ -104,16 +105,26 @@ def add_api_key(request):
 def start_websocket(request, user_id):
     try:
         try:
-            binance_exchange = Exchange.objects.get(name='binance')
+            exchange = Exchange.objects.get(name='binance')
         except Exchange.DoesNotExist:
             return Response({
                 'error': 'Exchange not found',
-            }, status=status.HTTP_404_NOT_FOUND)
+            })
+
+        try:
+            trades = (Trade.objects
+                      .filter(user_id=user_id, exchange=exchange, sell_price__isnull=True)
+                      .values('symbol', 'quantity')
+                      .annotate(avg_buy_price=Avg('buy_price')))
+        except Trade.DoesNotExist:
+            return Response({
+                'error': 'Trade not found',
+            })
 
         try:
             api_keys = APIKey.objects.get(
                 user_id=user_id,
-                exchange=binance_exchange,
+                exchange=exchange,
             )
         except APIKey.DoesNotExist:
             return Response({
@@ -132,8 +143,11 @@ def start_websocket(request, user_id):
         response = requests.post(
             fastapi_url,
             json={
-                'api_key': api_key,
-                'secret_key': secret_key,
+                'api_keys': {
+                    'api_key': api_key,
+                    'secret_key': secret_key,
+                },
+                'trades': list(trades),
             }
         )
 
