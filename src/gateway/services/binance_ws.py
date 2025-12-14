@@ -1,15 +1,14 @@
+import aiohttp
+import json
 import asyncio
-import os
-import sys
-
 import websockets
 import logging
-import aiohttp
 import time
 import hmac
 import hashlib
 import urllib.parse
-import json
+import sys
+import os
 
 # Добавляем путь к Django проекту
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -374,28 +373,33 @@ class BinanceWebsocket(object):
             self.trades.append(fallback_trade)
             logger.warning(f"⚠️ Added trade without DB ID. Will try to recover later.")
 
+    # binance_ws.py (исправленный метод check_profit)
     async def check_profit(self, market_data):
         try:
-            symbol = market_data.get('s').lower()
-            market_price = float(market_data.get('p'))
-            market_quantity = float(market_data.get('q'))
+            symbol = market_data.get('s', '').lower()
+            market_price = float(market_data.get('p', 0))
 
             if not symbol or market_price <= 0:
-                logger.warning(f'⚠️ Invalid market data for {symbol}: price={market_price}')
+                logger.debug(f'⚠️ Invalid market data for {symbol}: price={market_price}')
                 return
 
-            # Находим активную сделку
-            trade_data = next((trade for trade in self.trades
-                               if trade.get('symbol', '').lower() == symbol), None)
+            # Находим все активные сделки для этого символа
+            active_trades = [
+                trade for trade in self.trades
+                if trade.get('symbol', '').lower() == symbol
+            ]
 
-            # === ИЗМЕНЕНИЕ НАЧАЛО: Сначала логируем анализ прибыли ===
-            if trade_data:
-                buy_price = float(trade_data.get('avg_buy_price', 0))
+            if not active_trades:
+                logger.debug(f'ℹ️ No active trades found for {symbol}')
+                return
+
+            # Для каждой сделки логируем анализ
+            for trade in active_trades:
+                buy_price = float(trade.get('avg_buy_price', 0))
 
                 if buy_price > 0:
                     profit_percent = ((market_price - buy_price) / buy_price) * 100
 
-                    # Логируем анализ прибыли ПЕРЕД вызовом торгового сервиса
                     logger.info(f'''
                         📊 Profit Analysis for {symbol.upper()}
                         ├── Buy Price: ${buy_price:.6f}
@@ -403,26 +407,15 @@ class BinanceWebsocket(object):
                         ├── Profit/Loss: {profit_percent:+.2f}%
                         └── Status: {'🟢 PROFIT' if profit_percent > 0 else '🔴 LOSS'}
                     ''')
-            else:
-                # Если сделки нет, просто выходим без лишних сообщений
-                return
-            # === ИЗМЕНЕНИЕ КОНЕЦ ===
 
-            # Теперь вызываем trading_service для проверки условий закрытия
+            # Вызываем торговый сервис только один раз для символа
             if self.trading_service:
-                logger.info(f"🔄 Calling trading service for {symbol}...")
                 try:
+                    logger.info(f"🔄 Calling trading service for {symbol}...")
                     trade_closed = await self.trading_service.check_and_close_trades(market_data)
+
                     if trade_closed:
                         logger.info(f"✅ Trade for {symbol} was closed by trading service")
-
-                        # Проверяем остались ли еще сделки для этого символа
-                        remaining_trades = [t for t in self.trades
-                                            if t.get('symbol', '').lower() == symbol]
-
-                        if not remaining_trades:
-                            logger.info(f"ℹ️ All trades for {symbol} have been closed")
-                            return
                     else:
                         logger.info(f"ℹ️ Trading service did not close trade for {symbol}")
                 except Exception as e:
@@ -478,6 +471,30 @@ class BinanceWebsocket(object):
         except Exception as e:
             logger.error(f'❌ Error in profit analysis logging: {str(e)}')
 
+    async def subscribe_to_symbol(self, symbol: str):
+        """Подписка на обновления цены для конкретного символа"""
+        try:
+            symbol_lower = symbol.lower()
+            stream_name = f"{symbol_lower}@trade"
+
+            # Проверяем, подписаны ли уже
+            if stream_name in self.active_streams:
+                logger.debug(f"ℹ️ Already subscribed to {symbol_lower}")
+                return True
+
+            # Добавляем в активные стримы
+            self.active_streams.add(stream_name)
+
+            # Переподключаемся с новым списком стримов
+            await self._reconnect_market_streams()
+
+            logger.info(f"✅ Subscribed to {symbol_lower}")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Error subscribing to {symbol}: {e}")
+            return False
+
     async def unsubscribe_from_symbol(self, symbol: str):
         """Отписка от стрима для символа"""
         try:
@@ -511,22 +528,25 @@ class BinanceWebsocket(object):
         """Переподключение к market data с обновленным списком стримов"""
         try:
             if not self.active_streams:
-                if self.market_connection:
-                    await self.market_connection.close()
-                    self.market_connection = None
+                logger.info("ℹ️ No active streams to reconnect to")
                 return
 
             # Создаем новый URL со всеми активными стримами
-            streams = '/'.join(sorted(self.active_streams))
+            streams_list = sorted(self.active_streams)
+            streams = '/'.join(streams_list)
             stream_url = f'{self.ws_stream_url}?streams={streams}'
 
-            # Закрываем старое соединение
+            # Закрываем старое соединение если есть
             if self.market_connection:
-                await self.market_connection.close()
+                try:
+                    await self.market_connection.close()
+                except:
+                    pass
 
             # Создаем новое соединение
             self.market_connection = await websockets.connect(stream_url)
-            logger.info(f"🔄 Reconnected to market streams: {streams}")
+            logger.info(f"🔄 Reconnected to {len(streams_list)} market streams")
+            logger.info(f"   Active streams: {streams_list}")
 
             # Перезапускаем слушателя
             await self._restart_market_listener()

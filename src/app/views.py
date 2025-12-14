@@ -1,3 +1,5 @@
+import time
+
 from django.contrib.auth import authenticate
 from django.http import HttpResponse
 from django.utils import timezone
@@ -12,6 +14,7 @@ import logging
 from .models import APIKey, Exchange, Trade
 from .serializers import UserRegisterSerializer, UserLoginSerializer, ExchangeSerializer, APIKeySerializer, \
     TradeSerializer
+from gateway.routes.ws import active_connections
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +141,8 @@ def start_websocket(request, user_id):
         trades_qs = Trade.objects.filter(
             user_id=user_id,
             exchange=exchange,
-            sell_price__isnull=True
-        )
+            status__in=['open', 'active']
+        ).exclude(quantity=0)
 
         trades_list = []
         for trade in trades_qs:
@@ -305,103 +308,101 @@ def check_websocket_status(request, user_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_trade(request):
-    """Создание новой сделки с настройками"""
-    from .models import Trade, Exchange
-    from .serializers import TradeSerializer
-
+    """Создание новой сделки через FastAPI WebSocket"""
     try:
-        # Проверяем существование биржи
-        exchange = Exchange.objects.get(name='binance')
-
-        trade_data = {
-            'user': request.user,
-            'exchange': exchange,
-            'symbol': request.data.get('symbol'),
-            'quantity': float(request.data.get('quantity', 0)),
-            'buy_price': float(request.data.get('buy_price', 0)),
-            'target_profit_percent': float(request.data.get('target_profit', 1.0)),
-            'stop_loss_percent': float(request.data.get('stop_loss', 0.5)),
-        }
+        symbol = request.data.get('symbol', '').upper()
+        usdt_amount = float(request.data.get('usdt_amount', 0))
+        target_profit = float(request.data.get('target_profit', 1.0))
+        stop_loss = float(request.data.get('stop_loss', 0.5))
 
         # Валидация
-        if trade_data['quantity'] <= 0:
-            return Response({'error': 'Quantity must be positive'}, status=400)
+        if not symbol:
+            return Response({'error': 'Symbol is required'}, status=400)
 
-        trade = Trade.objects.create(**trade_data)
-        serializer = TradeSerializer(trade)
+        if usdt_amount <= 0:
+            return Response({'error': 'Amount must be positive'}, status=400)
 
-        return Response({
-            'trade': serializer.data,
-            'message': 'Trade created successfully'
-        })
+        if target_profit <= 0 or stop_loss <= 0:
+            return Response({'error': 'Target profit and stop loss must be positive'}, status=400)
 
-    except Exchange.DoesNotExist:
-        return Response({'error': 'Exchange not found'}, status=404)
+        # Проверяем активное WebSocket соединение
+        status_url = f'{HOST_FAST_API}/users/{request.user.id}/exchanges/binance/status/'
+        try:
+            status_response = requests.get(status_url, timeout=5)
+            if status_response.status_code != 200:
+                return Response({
+                    'error': 'WebSocket not active',
+                    'message': 'Please start WebSocket connection first'
+                }, status=400)
+        except:
+            return Response({'error': 'Cannot connect to WebSocket service'}, status=503)
+
+        # Отправляем запрос в FastAPI для создания сделки
+        create_trade_url = f'{HOST_FAST_API}/users/{request.user.id}/exchanges/binance/create_trade/'
+
+        payload = {
+            'symbol': symbol,
+            'usdt_amount': usdt_amount,
+            'target_profit': target_profit,
+            'stop_loss': stop_loss
+        }
+
+        try:
+            response = requests.post(
+                create_trade_url,
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                return Response(result)
+            else:
+                return Response({
+                    'error': f'FastAPI error: {response.status_code}',
+                    'details': response.text
+                }, status=response.status_code)
+
+        except requests.exceptions.Timeout:
+            return Response({'error': 'Request timeout'}, status=504)
+        except requests.exceptions.ConnectionError:
+            return Response({'error': 'Cannot connect to WebSocket service'}, status=503)
+
+    except ValueError as e:
+        return Response({'error': f'Invalid value: {str(e)}'}, status=400)
     except Exception as e:
-        return Response({'error': str(e)}, status=400)
+        logger.error(f"Error creating trade: {str(e)}", exc_info=True)
+        return Response({'error': str(e)}, status=500)
 
 
+# views.py (исправьте get_active_trades)
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def get_active_trades(request):
+def get_active_trades(request):  # Убрать async
     """Получение активных сделок пользователя"""
-    from .models import Trade, Exchange
-
     try:
         exchange = Exchange.objects.get(name='binance')
         trades = Trade.objects.filter(
             user=request.user,
             exchange=exchange,
-            status='open'
-        )
+            status__in=['open', 'active']
+        ).exclude(quantity=0)
 
         serializer = TradeSerializer(trades, many=True)
 
-        # Добавляем текущие цены (можно получить из кэша или API)
-        for trade in serializer.data:
-            # Здесь можно добавить текущую цену из рыночных данных
-            pass
-
         return Response({
             'count': trades.count(),
-            'trades': serializer.data
+            'trades': serializer.data,
+            'summary': {
+                'total_investment': sum(t.buy_price * t.quantity for t in trades),
+                'total_trades': trades.count(),
+            }
         })
 
     except Exception as e:
+        logger.error(f"Error getting active trades: {str(e)}", exc_info=True)
         return Response({'error': str(e)}, status=500)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def close_trade(request, trade_id):
-    """Ручное закрытие сделки"""
-    try:
-        from .models import Trade
-
-        # Получаем сделку
-        trade = Trade.objects.get(
-            id=trade_id,
-            user=request.user,
-            status='open'
-        )
-
-        # Здесь можно добавить логику ручного закрытия через Binance API
-        # Пока просто меняем статус
-        trade.status = 'cancelled'
-        trade.closed_at = timezone.now()
-        trade.save()
-
-        return Response({
-            'message': 'Trade closed successfully',
-            'trade_id': trade.id,
-            'status': trade.status
-        })
-
-    except Trade.DoesNotExist:
-        return Response({'error': 'Trade not found'}, status=404)
-    except Exception as e:
-        return Response({'error': str(e)}, status=500)
-
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])

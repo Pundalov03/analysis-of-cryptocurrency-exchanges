@@ -121,3 +121,55 @@ async def get_all_active_connections():
         'total_connections': len(active_connections),
         'connections': connections_info
     }
+
+
+@router.post("/users/{user_id}/exchanges/binance/create_trade/")
+async def create_trade_endpoint(user_id: int, trade_data: dict = Body(...)):
+    """Создание сделки через WebSocket соединение"""
+    try:
+        logger.info(f"📝 Creating trade for user {user_id}: {trade_data}")
+
+        if user_id not in active_connections:
+            raise HTTPException(status_code=400, detail="WebSocket connection not active")
+
+        ws_instance = active_connections[user_id]
+
+        if not hasattr(ws_instance, 'trading_service'):
+            raise HTTPException(status_code=500, detail="Trading service not initialized")
+
+        trading_service = ws_instance.trading_service
+
+        # Получаем данные
+        symbol = trade_data.get('symbol', '').upper()
+        usdt_amount = float(trade_data.get('usdt_amount', 0))
+        target_profit = float(trade_data.get('target_profit', trading_service.config['target_profit_percent']))
+        stop_loss = float(trade_data.get('stop_loss', trading_service.config['stop_loss_percent']))
+
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol is required")
+
+        if usdt_amount <= 0:
+            raise HTTPException(status_code=400, detail="Amount must be positive")
+
+        # Создаем сделку через TradingService
+        logger.info(f"💰 Creating trade: {symbol} for ${usdt_amount}")
+        order_result = await trading_service.buy_with_usdt(symbol, usdt_amount)
+
+        if not order_result:
+            raise HTTPException(status_code=400, detail="Failed to create trade")
+
+        return {
+            "success": True,
+            "message": f"Trade created successfully for {symbol}",
+            "order_id": order_result.get('orderId'),
+            "symbol": symbol,
+            "amount_usdt": usdt_amount,
+            "active_trades_count": len(ws_instance.trades) if hasattr(ws_instance, 'trades') else 0
+        }
+
+    except ValueError as e:
+        logger.error(f"Value error creating trade: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating trade: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
