@@ -1,5 +1,5 @@
 from django.contrib.auth.models import User
-from .models import Profile, Exchange, APIKey
+from .models import Profile, Exchange, APIKey, Trade
 from rest_framework import serializers
 
 class UserRegisterSerializer(serializers.ModelSerializer):
@@ -134,3 +134,15 @@ class APIKeySerializer(serializers.ModelSerializer):
         api_key.save()
 
         return api_key
+
+class TradeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Trade
+        fields = (
+            'id', 'symbol', 'quantity', 'buy_price',
+            'target_profit_percent', 'stop_loss_percent', 'status'
+        )
+        extra_kwargs = {
+            'target_profit_percent': {'required': False, 'default': 1.0},
+            'stop_loss_percent': {'required': False, 'default': 0.5},
+        }

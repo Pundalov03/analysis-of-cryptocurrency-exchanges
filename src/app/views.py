@@ -1,6 +1,6 @@
 from django.contrib.auth import authenticate
-from django.db.models import Avg
 from django.http import HttpResponse
+from django.utils import timezone
 import requests
 from rest_framework import status
 from rest_framework.authtoken.models import Token
@@ -10,7 +10,8 @@ from rest_framework.response import Response
 import logging
 
 from .models import APIKey, Exchange, Trade
-from .serializers import UserRegisterSerializer, UserLoginSerializer, ExchangeSerializer, APIKeySerializer
+from .serializers import UserRegisterSerializer, UserLoginSerializer, ExchangeSerializer, APIKeySerializer, \
+    TradeSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -143,9 +144,12 @@ def start_websocket(request, user_id):
         trades_list = []
         for trade in trades_qs:
             trades_list.append({
+                'trade_id': trade.id,
                 'symbol': trade.symbol.upper(),
                 'quantity': float(trade.quantity),
-                'avg_buy_price': float(trade.buy_price)
+                'avg_buy_price': float(trade.buy_price),
+                'target_profit_percent': float(trade.target_profit_percent),  # ✅
+                'stop_loss_percent': float(trade.stop_loss_percent),
             })
 
         logger.info(f"Found {len(trades_list)} active trades for user {user_id}")
@@ -296,3 +300,143 @@ def check_websocket_status(request, user_id):
             'error': 'Cannot check status',
             'details': str(e)
         }, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_trade(request):
+    """Создание новой сделки с настройками"""
+    from .models import Trade, Exchange
+    from .serializers import TradeSerializer
+
+    try:
+        # Проверяем существование биржи
+        exchange = Exchange.objects.get(name='binance')
+
+        trade_data = {
+            'user': request.user,
+            'exchange': exchange,
+            'symbol': request.data.get('symbol'),
+            'quantity': float(request.data.get('quantity', 0)),
+            'buy_price': float(request.data.get('buy_price', 0)),
+            'target_profit_percent': float(request.data.get('target_profit', 1.0)),
+            'stop_loss_percent': float(request.data.get('stop_loss', 0.5)),
+        }
+
+        # Валидация
+        if trade_data['quantity'] <= 0:
+            return Response({'error': 'Quantity must be positive'}, status=400)
+
+        trade = Trade.objects.create(**trade_data)
+        serializer = TradeSerializer(trade)
+
+        return Response({
+            'trade': serializer.data,
+            'message': 'Trade created successfully'
+        })
+
+    except Exchange.DoesNotExist:
+        return Response({'error': 'Exchange not found'}, status=404)
+    except Exception as e:
+        return Response({'error': str(e)}, status=400)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_active_trades(request):
+    """Получение активных сделок пользователя"""
+    from .models import Trade, Exchange
+
+    try:
+        exchange = Exchange.objects.get(name='binance')
+        trades = Trade.objects.filter(
+            user=request.user,
+            exchange=exchange,
+            status='open'
+        )
+
+        serializer = TradeSerializer(trades, many=True)
+
+        # Добавляем текущие цены (можно получить из кэша или API)
+        for trade in serializer.data:
+            # Здесь можно добавить текущую цену из рыночных данных
+            pass
+
+        return Response({
+            'count': trades.count(),
+            'trades': serializer.data
+        })
+
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def close_trade(request, trade_id):
+    """Ручное закрытие сделки"""
+    try:
+        from .models import Trade
+
+        # Получаем сделку
+        trade = Trade.objects.get(
+            id=trade_id,
+            user=request.user,
+            status='open'
+        )
+
+        # Здесь можно добавить логику ручного закрытия через Binance API
+        # Пока просто меняем статус
+        trade.status = 'cancelled'
+        trade.closed_at = timezone.now()
+        trade.save()
+
+        return Response({
+            'message': 'Trade closed successfully',
+            'trade_id': trade.id,
+            'status': trade.status
+        })
+
+    except Trade.DoesNotExist:
+        return Response({'error': 'Trade not found'}, status=404)
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_trade_history(request):
+    """Получение истории сделок"""
+    try:
+        from .models import Trade, Exchange
+
+        exchange = Exchange.objects.get(name='binance')
+        trades = Trade.objects.filter(
+            user=request.user,
+            exchange=exchange
+        ).order_by('-detected_at')
+
+        serializer = TradeSerializer(trades, many=True)
+
+        # Статистика
+        total_trades = trades.count()
+        profitable_trades = trades.filter(status='closed_profit').count()
+        loss_trades = trades.filter(status='closed_loss').count()
+        open_trades = trades.filter(status='open').count()
+
+        total_profit = sum(t.actual_profit for t in trades if t.actual_profit)
+
+        return Response({
+            'statistics': {
+                'total_trades': total_trades,
+                'profitable_trades': profitable_trades,
+                'loss_trades': loss_trades,
+                'open_trades': open_trades,
+                'success_rate': (profitable_trades / total_trades * 100) if total_trades > 0 else 0,
+                'total_profit': total_profit,
+            },
+            'trades': serializer.data
+        })
+
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)

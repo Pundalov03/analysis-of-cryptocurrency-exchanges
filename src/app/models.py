@@ -54,20 +54,65 @@ class APIKey(models.Model):
     def __str__(self):
         return f'{self.user.username} - {self.exchange.name}'
 
+
 class Trade(models.Model):
+    STATUS_OPEN = 'open'
+    STATUS_CLOSED_PROFIT = 'closed_profit'
+    STATUS_CLOSED_LOSS = 'closed_loss'
+    STATUS_CANCELLED = 'cancelled'
+
+    STATUS_CHOICES = [
+        (STATUS_OPEN, 'Open'),
+        (STATUS_CLOSED_PROFIT, 'Closed with Profit'),
+        (STATUS_CLOSED_LOSS, 'Closed with Loss'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     exchange = models.ForeignKey(Exchange, on_delete=models.CASCADE)
     symbol = models.CharField(max_length=20)
     quantity = models.FloatField()
     buy_price = models.FloatField()
-    sell_price = models.FloatField(null=True)
-    estimated_profit = models.FloatField(null=True)
+    sell_price = models.FloatField(null=True, blank=True)
+    estimated_profit = models.FloatField(null=True, blank=True)
+
+    # Добавляем поля для управления
+    target_profit_percent = models.FloatField(default=1.0)  # Целевой профит в %
+    stop_loss_percent = models.FloatField(default=0.5)  # Стоп-лосс в %
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_OPEN
+    )
+    closed_at = models.DateTimeField(null=True, blank=True)
+    actual_profit = models.FloatField(null=True, blank=True)  # Фактическая прибыль
+    commission_paid = models.FloatField(default=0.0)  # Добавляем поле для комиссии
+    buy_order_id = models.CharField(max_length=50, blank=True, null=True)  # Добавляем order_id
+    close_reason = models.CharField(max_length=50, blank=True, null=True)  # Причина закрытия
 
     detected_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f'{self.user.username} - {self.exchange.name} - {self.symbol} - {self.estimated_profit}'
+        return f'{self.user.username} - {self.symbol} - {self.status}'
 
+    @property
+    def is_active(self):
+        """Алиас для проверки активности"""
+        return self.status == self.STATUS_OPEN
+
+    def calculate_current_profit(self, current_price: float) -> dict:
+        """Расчет текущей прибыли"""
+        if not current_price or not self.buy_price:
+            return {'profit': 0, 'percent': 0}
+
+        profit = (current_price - self.buy_price) * self.quantity
+        percent = ((current_price - self.buy_price) / self.buy_price) * 100
+
+        return {
+            'profit': profit,
+            'percent': percent,
+            'current_price': current_price
+        }
 class Report(models.Model):
     FORMAT_CHOICES = [
         ('pdf', 'PDF'),
