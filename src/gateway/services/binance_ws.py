@@ -21,6 +21,7 @@ class BinanceWebsocket(object):
         self.trades = trades
         self.commission = 0.99
         self.time_offset = 0
+        self._tasks = []  # Для хранения фоновых задач
 
         if testnet:
             self.base_url = 'https://testnet.binance.vision/api/v3'
@@ -74,27 +75,29 @@ class BinanceWebsocket(object):
 
     async def get_listen_key(self):
         try:
-             async with aiohttp.ClientSession() as session:
-                 url = f'{self.base_url}/userDataStream'
-                 header = {'X-MBX-APIKEY': self.api_key}
+            async with aiohttp.ClientSession() as session:
+                url = f'{self.base_url}/userDataStream'
+                header = {'X-MBX-APIKEY': self.api_key}
 
-                 async with session.post(url, headers=header) as response:
-                     if response.status != 200:
-                         logger.error(f'❌ Failed to get listen key: {response.status}')
-                         return None
+                async with session.post(url, headers=header) as response:
+                    if response.status != 200:
+                        logger.error(f'❌ Failed to get listen key: {response.status}')
+                        return None
 
-                     data = await response.json()
-                     self.listen_key = data.get('listenKey')
-                     logger.info(f'✅ Listen key obtained: {self.listen_key}')
+                    data = await response.json()
+                    self.listen_key = data.get('listenKey')
+                    logger.info(f'✅ Listen key obtained: {self.listen_key}')
 
-                     return self.listen_key
+                    return self.listen_key
         except Exception as e:
             logger.error(f'Error getting listen key: {str(e)}')
             return None
 
     async def keepalive_listen_key(self):
         while self.is_connected:
-            await asyncio.sleep(1800)
+            await asyncio.sleep(1800)  # 30 минут
+            if not self.is_connected:  # Проверка перед обновлением
+                break
             try:
                 async with aiohttp.ClientSession() as session:
                     url = f'{self.base_url}/userDataStream'
@@ -104,8 +107,8 @@ class BinanceWebsocket(object):
                     async with session.put(url, headers=headers, params=params) as response:
                         if response.status != 200:
                             logger.error('❌ Failed to renew listen key')
-
-                        logger.info('✅ Listen key renewed')
+                        else:
+                            logger.info('✅ Listen key renewed')
             except Exception as e:
                 logger.error(f'Error renewing listen key: {str(e)}')
 
@@ -148,7 +151,6 @@ class BinanceWebsocket(object):
                         if float(balance['free']) > 0 or float(balance['locked']) > 0
                     }
                     logger.info(f'User balance processed: {len(self.user_balance)} assets:')
-                    # logger.info(self.user_balance)
         except Exception as e:
             logger.error(f'Error fetching user balance: {str(e)}')
 
@@ -180,31 +182,52 @@ class BinanceWebsocket(object):
             self.market_connection = await websockets.connect(stream_url)
             logger.info(f'✅ Connected to market data stream: {streams}')
 
-            asyncio.create_task(self.listen_market_data())
+            # Создаем и сохраняем задачу
+            market_task = asyncio.create_task(self.listen_market_data())
+            self._tasks.append(market_task)
         except Exception as e:
             logger.error(f'Error subscribing to market data stream: {str(e)}')
 
     async def listen_user_data(self):
         try:
             logger.info(f'🎧 Starting to listen to User Data Stream...')
-            async for message in self.connection:
-                await self.handle_user_message(message)
-        except websockets.exceptions.ConnectionClosedError as e:
-            logger.error(f'❌ User Data Stream connection closed: {e}')
-            self.is_connected = False
+            while self.is_connected and self.connection:
+                try:
+                    # Используем recv() с таймаутом вместо async for
+                    message = await asyncio.wait_for(self.connection.recv(), timeout=1.0)
+                    await self.handle_user_message(message)
+                except asyncio.TimeoutError:
+                    continue  # Просто продолжаем слушать
+                except websockets.exceptions.ConnectionClosedError as e:
+                    logger.error(f'❌ User Data Stream connection closed: {e}')
+                    break
+                except Exception as e:
+                    logger.error(f'❌ Error in user data listener: {e}')
+                    break
+            logger.info(f'User data listener stopped for user {self.user_id}')
         except Exception as e:
             logger.error(f'❌ Error in user data listener: {e}')
             self.is_connected = False
 
     async def listen_market_data(self):
         try:
-            async for message in self.market_connection:
-                await self.handle_market_message(message)
-        except websockets.exceptions.ConnectionClosedError as e:
-            logger.error(f'❌ Market Data Stream connection closed: {e}')
-            self.is_connected = False
+            while self.is_connected and self.market_connection:
+                try:
+                    # Используем recv() с таймаутом вместо async for
+                    message = await asyncio.wait_for(self.market_connection.recv(), timeout=1.0)
+                    await self.handle_market_message(message)
+                except asyncio.TimeoutError:
+                    continue
+                except websockets.exceptions.ConnectionClosedError as e:
+                    logger.error(f'❌ Market Data Stream connection closed: {e}')
+                    break
+                except Exception as e:
+                    logger.error(f'❌ Error in market data listening: {str(e)}')
+                    break
+            logger.info(f'Market data listener stopped for user {self.user_id}')
         except Exception as e:
             logger.error(f'❌ Error in market data listening: {str(e)}')
+            self.is_connected = False
 
     async def handle_market_message(self, message):
         try:
@@ -270,7 +293,8 @@ class BinanceWebsocket(object):
                 logger.warning(f'⚠️ Invalid market data for {symbol}: price={market_price}')
                 return
 
-            trade_data = [trade for trade in self.trades if trade.get('symbol').lower() == symbol][0]
+            trade_data = next((trade for trade in self.trades
+                               if trade.get('symbol', '').lower() == symbol), None)
 
             if not trade_data:
                 logger.warning(f'⚠️ Have not data for {symbol} in ')
@@ -281,7 +305,7 @@ class BinanceWebsocket(object):
             sell_price_after_commission = market_price * self.commission
             price_difference = sell_price_after_commission - avg_buy_price
 
-            is_profit = sell_price_after_commission > avg_buy_price and market_quantity <= balance_quantity
+            is_profit = sell_price_after_commission > avg_buy_price and market_quantity >= balance_quantity
 
             logger.info(f'''
             📊 Profit Analysis for {symbol.upper()}
@@ -312,8 +336,10 @@ class BinanceWebsocket(object):
             logger.info(f'Getting user balance for user {self.user_id}...')
             await self.get_user_balance()
 
-            asyncio.create_task(self.listen_user_data())
-            asyncio.create_task(self.keepalive_listen_key())
+            # Создаем и сохраняем задачи
+            user_task = asyncio.create_task(self.listen_user_data())
+            keepalive_task = asyncio.create_task(self.keepalive_listen_key())
+            self._tasks.extend([user_task, keepalive_task])
 
             symbols = await self.get_symbols_from_trades()
             if symbols:
@@ -328,8 +354,46 @@ class BinanceWebsocket(object):
             raise e
 
     async def disconnect(self):
-        if self.is_connected and self.connection and self.market_connection:
+        """Полное отключение от всех соединений и отмена задач"""
+        try:
+            logger.info(f'Starting disconnect for user {self.user_id}...')
             self.is_connected = False
-            await self.connection.close()
-            await self.market_connection.close()
-            logger.info(f"Connection closed for user {self.user_id}")
+
+            # Даем время задачам увидеть флаг is_connected = False
+            await asyncio.sleep(0.2)
+
+            # Отменяем все задачи
+            for task in self._tasks:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=0.5)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
+
+            # Закрываем соединения
+            close_tasks = []
+
+            if self.connection:
+                close_tasks.append(self.connection.close())
+
+            if self.market_connection:
+                close_tasks.append(self.market_connection.close())
+
+            if close_tasks:
+                try:
+                    await asyncio.wait_for(asyncio.gather(*close_tasks), timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+
+            # Очищаем список задач
+            self._tasks.clear()
+
+            logger.info(f"✅ Full disconnect completed for user {self.user_id}")
+
+        except Exception as e:
+            logger.error(f"Error during disconnect: {str(e)}")
+
+    async def stop(self):
+        """Альтернативный метод для полной остановки"""
+        await self.disconnect()

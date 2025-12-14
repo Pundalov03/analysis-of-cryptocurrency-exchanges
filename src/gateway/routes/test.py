@@ -20,7 +20,7 @@ async def simulate_buy_order(user_id: int):
             "i": 999000 + user_id,
             "l": "0.00100000",
             "z": "0.00100000",
-            "L": "50000.00000000",
+            "L": "1000.00000000",
             "n": "0.00000000",
             "N": None,
             "T": int(time.time() * 1000),
