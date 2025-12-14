@@ -151,7 +151,7 @@ def start_websocket(request, user_id):
                 'symbol': trade.symbol.upper(),
                 'quantity': float(trade.quantity),
                 'avg_buy_price': float(trade.buy_price),
-                'target_profit_percent': float(trade.target_profit_percent),  # ✅
+                'target_profit_percent': float(trade.target_profit_percent),
                 'stop_loss_percent': float(trade.stop_loss_percent),
             })
 
@@ -375,11 +375,9 @@ def create_trade(request):
         logger.error(f"Error creating trade: {str(e)}", exc_info=True)
         return Response({'error': str(e)}, status=500)
 
-
-# views.py (исправьте get_active_trades)
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def get_active_trades(request):  # Убрать async
+def get_active_trades(request):
     """Получение активных сделок пользователя"""
     try:
         exchange = Exchange.objects.get(name='binance')

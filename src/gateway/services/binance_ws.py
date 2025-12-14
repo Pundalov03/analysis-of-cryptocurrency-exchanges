@@ -10,19 +10,17 @@ import urllib.parse
 import sys
 import os
 
-# Добавляем путь к Django проекту
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-# Настраиваем Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 
 try:
     import django
 
     django.setup()
-    from app.models import Trade, Exchange  # ✅ Прямой импорт
+    from app.models import Trade, Exchange
     from django.conf import settings
 except ImportError as e:
     logging.error(f"Failed to setup Django: {e}")
@@ -117,8 +115,8 @@ class BinanceWebsocket(object):
 
     async def keepalive_listen_key(self):
         while self.is_connected:
-            await asyncio.sleep(1800)  # 30 минут
-            if not self.is_connected:  # Проверка перед обновлением
+            await asyncio.sleep(1800)
+            if not self.is_connected:
                 break
             try:
                 async with aiohttp.ClientSession() as session:
@@ -230,11 +228,10 @@ class BinanceWebsocket(object):
             logger.info(f'🎧 Starting to listen to User Data Stream...')
             while self.is_connected and self.connection:
                 try:
-                    # Используем recv() с таймаутом вместо async for
                     message = await asyncio.wait_for(self.connection.recv(), timeout=1.0)
                     await self.handle_user_message(message)
                 except asyncio.TimeoutError:
-                    continue  # Просто продолжаем слушать
+                    continue
                 except websockets.exceptions.ConnectionClosedError as e:
                     logger.error(f'❌ User Data Stream connection closed: {e}')
                     break
@@ -251,7 +248,6 @@ class BinanceWebsocket(object):
         try:
             logger.info(f'🎧 Starting market data listener for user {self.user_id}')
 
-            # Используем async for для безопасного чтения
             try:
                 async for message in self.market_connection:
                     if not self.is_connected:
@@ -272,11 +268,9 @@ class BinanceWebsocket(object):
             if 'stream' in data:
                 stream_data = data['data']
                 if stream_data.get('e') == 'trade':
-                    # Безопасный вызов
                     await self.check_profit(stream_data)
             else:
                 if data.get('e') == 'trade':
-                    # Безопасный вызов
                     await self.check_profit(data)
         except Exception as e:
             logger.error(f'Error handling market message: {str(e)}')
@@ -313,7 +307,7 @@ class BinanceWebsocket(object):
         logger.info(f'🛒 NEW PURCHASE DETECTED: {symbol} {quantity} @ {price}')
 
         try:
-            exchange_name = getattr(self, 'exchange_name', 'binance')  # или 'binance'
+            exchange_name = getattr(self, 'exchange_name', 'binance')
 
             exchange = await Exchange.objects.aget(name__iexact=exchange_name)
 
@@ -324,11 +318,11 @@ class BinanceWebsocket(object):
                 symbol=symbol.upper(),
                 quantity=quantity,
                 buy_price=price,
-                buy_order_id=trade_data.get('i'),  # order_id из Binance
+                buy_order_id=trade_data.get('i'),
                 status='active',
                 target_profit_percent=self.trading_service.config['target_profit_percent'],
                 stop_loss_percent=self.trading_service.config['stop_loss_percent'],
-                commission_paid=0.0  # Комиссия будет учтена при закрытии
+                commission_paid=0.0
             )
 
             logger.info(f"📝 Created trade record in DB with ID: {trade_record.id}")
@@ -338,7 +332,7 @@ class BinanceWebsocket(object):
                 'symbol': symbol.lower(),
                 'quantity': quantity,
                 'avg_buy_price': price,
-                'trade_id': trade_record.id,  # ⚠️ ВАЖНО: добавляем ID из БД!
+                'trade_id': trade_record.id,
                 'buy_order_id': trade_data.get('i'),
                 'closed': False,
                 'created_at': time.time()
@@ -360,7 +354,6 @@ class BinanceWebsocket(object):
 
         except Exception as e:
             logger.error(f"❌ Error creating trade record: {e}")
-            # Можно добавить fallback: создать trade без ID, но с пометкой
             fallback_trade = {
                 'symbol': symbol.lower(),
                 'quantity': quantity,
@@ -373,7 +366,6 @@ class BinanceWebsocket(object):
             self.trades.append(fallback_trade)
             logger.warning(f"⚠️ Added trade without DB ID. Will try to recover later.")
 
-    # binance_ws.py (исправленный метод check_profit)
     async def check_profit(self, market_data):
         try:
             symbol = market_data.get('s', '').lower()

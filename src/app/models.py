@@ -76,19 +76,18 @@ class Trade(models.Model):
     sell_price = models.FloatField(null=True, blank=True)
     estimated_profit = models.FloatField(null=True, blank=True)
 
-    # Добавляем поля для управления
-    target_profit_percent = models.FloatField(default=1.0)  # Целевой профит в %
-    stop_loss_percent = models.FloatField(default=0.5)  # Стоп-лосс в %
+    target_profit_percent = models.FloatField(default=1.0)
+    stop_loss_percent = models.FloatField(default=0.5)
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
         default=STATUS_OPEN
     )
     closed_at = models.DateTimeField(null=True, blank=True)
-    actual_profit = models.FloatField(null=True, blank=True)  # Фактическая прибыль
-    commission_paid = models.FloatField(default=0.0)  # Добавляем поле для комиссии
-    buy_order_id = models.CharField(max_length=50, blank=True, null=True)  # Добавляем order_id
-    close_reason = models.CharField(max_length=50, blank=True, null=True)  # Причина закрытия
+    actual_profit = models.FloatField(null=True, blank=True)
+    commission_paid = models.FloatField(default=0.0)
+    buy_order_id = models.CharField(max_length=50, blank=True, null=True)
+    close_reason = models.CharField(max_length=50, blank=True, null=True)
 
     detected_at = models.DateTimeField(auto_now_add=True)
 

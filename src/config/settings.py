@@ -48,11 +48,11 @@ INSTALLED_APPS = [
 ]
 
 TRADING_CONFIG = {
-    'DEFAULT_TARGET_PROFIT': 1.0,  # 1%
-    'DEFAULT_STOP_LOSS': 0.5,      # 0.5%
-    'MIN_TRADE_AMOUNT_USD': 10.0,  # Минимальная сумма сделки
-    'COMMISSION_RATE': 0.001,      # Комиссия 0.1%
-    'AUTO_CLOSE_ENABLED': True,    # Автоматическое закрытие
+    'DEFAULT_TARGET_PROFIT': 1.0,
+    'DEFAULT_STOP_LOSS': 0.5,
+    'MIN_TRADE_AMOUNT_USD': 10.0,
+    'COMMISSION_RATE': 0.001,
+    'AUTO_CLOSE_ENABLED': True,
 }
 
 TARGET_PROFIT_PERCENT = 1.0  # Явное указание

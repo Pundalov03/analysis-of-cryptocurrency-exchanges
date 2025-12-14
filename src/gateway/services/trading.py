@@ -1,4 +1,3 @@
-# trading.py (исправленная версия)
 import logging
 import sys
 import os
@@ -8,12 +7,10 @@ import aiohttp
 from typing import Dict, Optional
 from django.utils import timezone
 
-# Добавляем путь к Django проекту
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-# Настраиваем Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 
 try:
@@ -37,8 +34,8 @@ class TradingService:
         # Загружаем конфигурацию
         trading_config = getattr(settings, 'TRADING_CONFIG', {})
 
-        # ✅ ВАЖНО: Проверяем, что target_profit_percent не 0
-        target_profit_default = max(trading_config.get('DEFAULT_TARGET_PROFIT', 1.0), 0.5)  # Минимум 0.5%
+        # Проверяем, что target_profit_percent не 0
+        target_profit_default = max(trading_config.get('DEFAULT_TARGET_PROFIT', 1.0), 0.5)
 
         self.config = {
             'target_profit_percent': getattr(settings, 'TARGET_PROFIT_PERCENT', target_profit_default),
@@ -52,7 +49,7 @@ class TradingService:
             'cache_ttl': 60,
         }
 
-        # ✅ Проверяем минимальные значения
+        # Проверяем минимальные значения
         if self.config['target_profit_percent'] < 0.5:
             logger.warning(f"⚠️ Target profit too low ({self.config['target_profit_percent']}%), setting to 0.5%")
             self.config['target_profit_percent'] = 0.5
@@ -69,10 +66,6 @@ class TradingService:
             'symbol_info': {}
         }
         self._cache_timestamps = {}
-
-    # ========== ОСНОВНЫЕ МЕТОДЫ ==========
-
-    # trading.py - добавьте эти методы в класс TradingService
 
     async def buy_with_usdt(self, symbol: str, usdt_amount: float) -> Optional[Dict]:
         """Покупка монеты на определенную сумму в USDT"""
@@ -101,7 +94,7 @@ class TradingService:
             order_result = await self._create_market_buy_order(symbol, quantity_float)
 
             if order_result:
-                # ✅ ВАЖНО: После успешной покупки подписываемся на обновления цены
+                # После успешной покупки подписываемся на обновления цены
                 await self._subscribe_to_symbol_after_purchase(symbol)
 
                 # Сохраняем сделку в БД
@@ -118,14 +111,12 @@ class TradingService:
         try:
             symbol_lower = symbol.lower()
 
-            # Проверяем, подписаны ли уже на этот символ
             if hasattr(self.ws, 'active_streams'):
                 stream_name = f"{symbol_lower}@trade"
 
                 if stream_name not in self.ws.active_streams:
                     logger.info(f"📡 Subscribing to {symbol_lower} after purchase...")
 
-                    # Вызываем метод подписки из ws
                     await self.ws.subscribe_to_market_data_stream(stream_name)
 
                     logger.info(f"✅ Successfully subscribed to {symbol_lower}")
@@ -201,8 +192,6 @@ class TradingService:
                     return None
 
         return None
-
-    # trading.py - исправьте метод _save_trade_to_db_and_list
 
     async def _save_trade_to_db_and_list(self, symbol: str, order_data: dict,
                                          current_price: float, quantity: float):
