@@ -304,16 +304,16 @@ def check_websocket_status(request, user_id):
             'details': str(e)
         }, status=500)
 
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_trade(request):
-    """Создание новой сделки через FastAPI WebSocket"""
+    """Создание быстрой сделки с оптимизированным исполнением"""
     try:
         symbol = request.data.get('symbol', '').upper()
         usdt_amount = float(request.data.get('usdt_amount', 0))
-        target_profit = float(request.data.get('target_profit', 1.0))
-        stop_loss = float(request.data.get('stop_loss', 0.5))
+        order_type = request.data.get('order_type', 'MARKET')  # MARKET или LIMIT
+        slippage = float(request.data.get('slippage', 0.002))  # 0.2% по умолчанию
+        create_trade_record = request.data.get('create_trade_record', True)  # ✅ Новый параметр
 
         # Валидация
         if not symbol:
@@ -321,9 +321,6 @@ def create_trade(request):
 
         if usdt_amount <= 0:
             return Response({'error': 'Amount must be positive'}, status=400)
-
-        if target_profit <= 0 or stop_loss <= 0:
-            return Response({'error': 'Target profit and stop loss must be positive'}, status=400)
 
         # Проверяем активное WebSocket соединение
         status_url = f'{HOST_FAST_API}/users/{request.user.id}/exchanges/binance/status/'
@@ -337,19 +334,20 @@ def create_trade(request):
         except:
             return Response({'error': 'Cannot connect to WebSocket service'}, status=503)
 
-        # Отправляем запрос в FastAPI для создания сделки
-        create_trade_url = f'{HOST_FAST_API}/users/{request.user.id}/exchanges/binance/create_trade/'
+        # Отправляем запрос в FastAPI для создания быстрой сделки
+        create_fast_trade_url = f'{HOST_FAST_API}/users/{request.user.id}/exchanges/binance/create_trade/'
 
         payload = {
             'symbol': symbol,
             'usdt_amount': usdt_amount,
-            'target_profit': target_profit,
-            'stop_loss': stop_loss
+            'order_type': order_type,
+            'slippage': slippage,
+            'create_trade_record': create_trade_record  # ✅ Передаем параметр
         }
 
         try:
             response = requests.post(
-                create_trade_url,
+                create_fast_trade_url,
                 json=payload,
                 headers={'Content-Type': 'application/json'},
                 timeout=10
@@ -372,7 +370,7 @@ def create_trade(request):
     except ValueError as e:
         return Response({'error': f'Invalid value: {str(e)}'}, status=400)
     except Exception as e:
-        logger.error(f"Error creating trade: {str(e)}", exc_info=True)
+        logger.error(f"Error creating fast trade: {str(e)}", exc_info=True)
         return Response({'error': str(e)}, status=500)
 
 @api_view(['GET'])

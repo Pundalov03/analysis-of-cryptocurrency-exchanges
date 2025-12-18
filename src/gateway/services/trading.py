@@ -1,3 +1,4 @@
+# trading.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 import logging
 import sys
 import os
@@ -106,6 +107,53 @@ class TradingService:
             logger.error(f"❌ Error buying with USDT: {e}")
             return None
 
+    async def buy_with_usdt_optimized(self, symbol: str, usdt_amount: float,
+                                      create_trade_record: bool = True) -> Optional[Dict]:
+        """Покупка с контролем создания сделки"""
+        try:
+            # Получаем текущую цену
+            current_price = await self._get_current_price(symbol)
+
+            if current_price <= 0:
+                logger.error(f"❌ Invalid current price for {symbol}: ${current_price}")
+                return None
+
+            # Рассчитываем количество
+            quantity = usdt_amount / current_price
+
+            # Форматируем количество
+            lot_size_info = await self._get_lot_size_info(symbol)
+            formatted_quantity = self._format_quantity_with_rules(quantity, lot_size_info)
+            quantity_float = float(formatted_quantity)
+
+            # Проверяем баланс
+            if not await self._check_usdt_balance(usdt_amount):
+                logger.error(f"❌ Insufficient USDT balance. Required: ${usdt_amount:.2f}")
+                return None
+
+            # Создаем ордер на покупку
+            order_result = await self._create_market_buy_order(symbol, quantity_float)
+
+            if order_result:
+                # Сохраняем ID ордера для предотвращения дублирования
+                order_id = order_result.get('orderId')
+                logger.info(f"📝 Order created with ID: {order_id}")
+
+                # После успешной покупки подписываемся на обновления цены
+                await self._subscribe_to_symbol_after_purchase(symbol)
+
+                # Сохраняем сделку в БД только если нужно
+                if create_trade_record:
+                    await self._save_trade_to_db_and_list(symbol, order_result, current_price, quantity_float)
+                else:
+                    logger.info("ℹ️ Trade record creation skipped (will be created by WebSocket)")
+
+                return order_result
+
+        except Exception as e:
+            logger.error(f"❌ Error buying with USDT: {e}")
+            return None
+
     async def _subscribe_to_symbol_after_purchase(self, symbol: str):
         """Подписка на обновления цены для нового символа"""
         try:
@@ -149,14 +197,15 @@ class TradingService:
                                    f"${self.config['min_trade_amount_usd']}, skipping")
                     return None
 
-                # Подготовка параметров
+                # Правильные параметры для MARKET BUY ордера
                 params = {
                     'symbol': symbol.upper(),
                     'side': 'BUY',
                     'type': 'MARKET',
                     'quantity': formatted_quantity,
                     'timestamp': self.ws._get_timestamp(),
-                    'recvWindow': 5000
+                    'recvWindow': 5000,
+                    'newOrderRespType': 'FULL'  # Полный ответ с fills
                 }
 
                 # Генерация подписи
@@ -181,6 +230,8 @@ class TradingService:
 
                         order_data = await response.json()
                         logger.info(f'✅ BUY order executed: {symbol} {formatted_quantity}')
+                        logger.info(f'   Order status: {order_data.get("status")}')
+                        logger.info(f'   Order ID: {order_data.get("orderId")}')
 
                         return order_data
 
@@ -216,10 +267,7 @@ class TradingService:
             try:
                 exchange = await Exchange.objects.aget(name='binance')
             except Exchange.DoesNotExist:
-                # ✅ ИСПРАВЛЕНИЕ: Создаем exchange только с name
-                exchange = await Exchange.objects.acreate(
-                    name='binance'
-                )
+                exchange = await Exchange.objects.acreate(name='binance')
 
             # Создаем сделку в базе данных
             trade = await Trade.objects.acreate(
@@ -255,11 +303,10 @@ class TradingService:
             logger.info(f"📝 Trade saved to DB. ID: {trade.id}")
             logger.info(f"   Active trades: {len(self.ws.trades)}")
             logger.info(f"   Price: ${avg_price:.2f}, Quantity: {quantity}")
-            logger.info(
-                f"   Target: {self.config['target_profit_percent']}%, Stop: {self.config['stop_loss_percent']}%")
+            logger.info(f"   Target: {self.config['target_profit_percent']}%, Stop: {self.config['stop_loss_percent']}%")
 
         except Exception as e:
-            logger.error(f"❌ Failed to save trade: {e}", exc_info=True)  # Добавьте exc_info для деталей
+            logger.error(f"❌ Failed to save trade: {e}", exc_info=True)
 
     async def _check_usdt_balance(self, required_amount: float) -> bool:
         """Проверка баланса USDT"""
@@ -361,9 +408,6 @@ class TradingService:
         target_profit = db_trade.target_profit_percent or self.config['target_profit_percent']
         stop_loss = db_trade.stop_loss_percent or self.config['stop_loss_percent']
 
-        # ✅ Упрощенная логика: не учитываем комиссию в условиях закрытия
-        # Комиссия будет учтена позже при расчете фактической прибыли
-
         logger.debug(f"📊 Trade {db_trade.id} analysis:")
         logger.debug(f"   Buy: ${buy_price:.2f}, Current: ${market_price:.2f}")
         logger.debug(f"   Profit: {profit_percent:.2f}%")
@@ -379,7 +423,7 @@ class TradingService:
         return False, ""
 
     async def _close_trade(self, trade, market_price: float, close_reason: str) -> bool:
-        """Закрытие сделки"""
+        """Закрытие сделки с обработкой EXPIRED ордеров"""
         try:
             symbol = trade.symbol.upper()
 
@@ -394,8 +438,28 @@ class TradingService:
                 logger.error(f"❌ Failed to create sell order for {symbol}")
                 return False
 
+            # Проверяем статус ордера
+            order_status = order_result.get('status')
+            order_id = order_result.get('orderId')
+
+            if order_status != 'FILLED':
+                logger.warning(f"⚠️ Order {order_id} status: {order_status}")
+
+                # Если ордер EXPIRED, пробуем IOC ордер
+                if order_status == 'EXPIRED':
+                    logger.info(f"🔄 Order expired, retrying with IOC order...")
+                    order_result = await self._create_ioc_sell_order(symbol, trade.quantity, market_price)
+
+                    if not order_result or order_result.get('status') != 'FILLED':
+                        logger.error(f"❌ IOC order also failed for {symbol}")
+                        return False
+
             # Получаем фактическую цену продажи
             sell_price = self._get_actual_sell_price(order_result)
+
+            if sell_price <= 0:
+                logger.error(f"❌ Invalid sell price: ${sell_price}")
+                return False
 
             # Рассчитываем прибыль с учетом комиссии
             buy_commission = trade.buy_price * trade.quantity * self.config['commission_rate']
@@ -438,10 +502,8 @@ class TradingService:
             logger.error(f"❌ Error closing trade: {e}", exc_info=True)
             return False
 
-    # ========== МЕТОДЫ РАБОТЫ С ОРДЕРАМИ ==========
-
     async def create_market_sell_order(self, symbol: str, quantity: float) -> Optional[Dict]:
-        """Создание рыночного ордера на продажу"""
+        """Создание РЫНОЧНОГО ордера на продажу - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         if not self.config['auto_close_enabled']:
             logger.warning(f"⚠️ Auto close disabled for {symbol}")
             return None
@@ -459,16 +521,20 @@ class TradingService:
                     logger.error(f"❌ Invalid quantity: {quantity_float}")
                     return None
 
-                # Подготавливаем запрос
+                # Правильные параметры для MARKET ордера
                 params = {
                     'symbol': symbol.upper(),
                     'side': 'SELL',
                     'type': 'MARKET',
                     'quantity': formatted_quantity,
                     'timestamp': self.ws._get_timestamp(),
-                    'recvWindow': 5000
+                    'recvWindow': 5000,
+                    'newOrderRespType': 'FULL'  # Полный ответ с fills
                 }
+
                 params['signature'] = self.ws._generate_signature(params)
+
+                logger.info(f"📤 Sending MARKET SELL order: {symbol} {quantity_float}")
 
                 async with aiohttp.ClientSession() as session:
                     url = f'{self.ws.base_url}/order'
@@ -477,11 +543,23 @@ class TradingService:
                     async with session.post(url, headers=headers, params=params) as response:
                         if response.status == 200:
                             order_data = await response.json()
-                            logger.info(f"✅ SELL order executed: {symbol} {quantity_float}")
+                            logger.info(f"✅ MARKET SELL order executed: {symbol} {quantity_float}")
+                            logger.info(f"   Order ID: {order_data.get('orderId')}")
+                            logger.info(f"   Status: {order_data.get('status')}")
+
+                            # Проверяем, что ордер действительно исполнен
+                            if order_data.get('status') == 'FILLED':
+                                fills = order_data.get('fills', [])
+                                if fills:
+                                    avg_price = self._get_actual_sell_price(order_data)
+                                    logger.info(f"   Filled: {order_data.get('executedQty')} @ avg ${avg_price:.2f}")
+                            else:
+                                logger.warning(f"⚠️ Order not filled: {order_data.get('status')}")
+
                             return order_data
                         else:
                             error_text = await response.text()
-                            logger.warning(f"⚠️ Sell order failed (attempt {attempt + 1}): {error_text}")
+                            logger.error(f'❌ Sell order failed: {error_text}')
 
                             if attempt < self.config['max_retries'] - 1:
                                 await asyncio.sleep(self.config['retry_delay'])
@@ -490,13 +568,92 @@ class TradingService:
                             return None
 
             except Exception as e:
-                logger.error(f"❌ Error creating sell order (attempt {attempt + 1}): {e}")
+                logger.error(f"❌ Error creating sell order: {e}")
                 if attempt < self.config['max_retries'] - 1:
                     await asyncio.sleep(self.config['retry_delay'])
                 else:
                     return None
 
         return None
+
+    async def _create_ioc_sell_order(self, symbol: str, quantity: float, current_price: float) -> Optional[Dict]:
+        """Создание лимитного ордера с IOC для гарантированного исполнения"""
+        try:
+            # Используем лимитный ордер с ценой ниже рынка для быстрого исполнения
+            limit_price = current_price * 0.995  # 0.5% ниже рынка
+
+            lot_size_info = await self._get_lot_size_info(symbol)
+            formatted_quantity = self._format_quantity_with_rules(quantity, lot_size_info)
+            formatted_price = self._format_price(limit_price, lot_size_info)
+
+            params = {
+                'symbol': symbol.upper(),
+                'side': 'SELL',
+                'type': 'LIMIT',
+                'timeInForce': 'IOC',  # Immediate Or Cancel
+                'quantity': formatted_quantity,
+                'price': formatted_price,
+                'timestamp': self.ws._get_timestamp(),
+                'recvWindow': 5000,
+                'newOrderRespType': 'FULL'
+            }
+
+            params['signature'] = self.ws._generate_signature(params)
+
+            logger.info(f"📤 Sending IOC LIMIT SELL: {symbol} {quantity} @ ${limit_price:.2f}")
+
+            async with aiohttp.ClientSession() as session:
+                url = f'{self.ws.base_url}/order'
+                headers = {'X-MBX-APIKEY': self.ws.api_key}
+
+                async with session.post(url, headers=headers, params=params) as response:
+                    if response.status == 200:
+                        order_data = await response.json()
+                        logger.info(f"✅ IOC LIMIT order result: {order_data.get('status')}")
+                        return order_data
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"❌ IOC order failed: {error_text}")
+                        return None
+
+        except Exception as e:
+            logger.error(f"❌ IOC order error: {e}")
+            return None
+
+    def _format_price(self, price: float, lot_size_info: Dict) -> str:
+        """Форматирование цены по правилам биржи"""
+        try:
+            # Получаем TICK_SIZE фильтр
+            tick_size = 0.01  # default
+
+            if 'filters' in lot_size_info:
+                for f in lot_size_info['filters']:
+                    if f.get('filterType') == 'PRICE_FILTER':
+                        tick_size = float(f.get('tickSize', 0.01))
+                        break
+
+            # Округляем до ближайшего tick size
+            if tick_size > 0:
+                steps = round(price / tick_size)
+                price = steps * tick_size
+
+            # Определяем точность
+            if tick_size >= 1:
+                precision = 0
+            elif tick_size >= 0.1:
+                precision = 1
+            elif tick_size >= 0.01:
+                precision = 2
+            elif tick_size >= 0.001:
+                precision = 3
+            else:
+                precision = 8
+
+            return f"{price:.{precision}f}"
+
+        except Exception as e:
+            logger.warning(f"⚠️ Error formatting price: {e}")
+            return f"{price:.2f}"
 
     def _get_actual_sell_price(self, order_data: Dict) -> float:
         """Получает фактическую цену продажи из ордера"""
@@ -518,8 +675,6 @@ class TradingService:
             return float(order_data.get('price', 0))
         except:
             return 0.0
-
-    # ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
 
     async def _get_current_price(self, symbol: str) -> float:
         """Получение текущей цены"""
@@ -634,8 +789,6 @@ class TradingService:
                 logger.info(f"🗑️ Removed trade {trade_id} from active list")
             else:
                 logger.warning(f"⚠️ Trade {trade_id} not found in active list")
-
-    # ========== ОЧИСТКА КЕША ==========
 
     def _clear_cache_for_symbol(self, symbol: str):
         """Очищает кеш для символа"""

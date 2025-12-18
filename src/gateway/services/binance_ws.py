@@ -1,3 +1,4 @@
+# binance_ws.py - ДОБАВИМ МЕТОДЫ ДЛЯ ОБРАБОТКИ EXPIRED
 import aiohttp
 import json
 import asyncio
@@ -296,12 +297,64 @@ class BinanceWebsocket(object):
 
         logger.info(f'📊 Order Update: {side} {symbol} - Status: {order_status}')
 
-        if side == 'BUY' and order_status == 'FILLED' and order_type == 'MARKET':
+        # Обрабатываем разные статусы ордеров
+        if order_status in ['EXPIRED', 'CANCELED', 'REJECTED']:
+            logger.warning(f"⚠️ Order {order_status}: {symbol} {side}")
+
+            # Если это продажа и ордер истек, уведомляем торговый сервис
+            if side == 'SELL' and order_status == 'EXPIRED':
+                await self._handle_expired_sell_order(symbol, data)
+
+        # Логируем событие
+        elif side == 'BUY' and order_status == 'FILLED' and order_type == 'MARKET':
             quantity = float(data.get('l'))
             price = float(data.get('L'))
 
-            if quantity > 0 and price > 0:
-                await self.handle_new_purchase(symbol, quantity, price, data)
+            logger.info(f'🛒 BUY Order FILLED: {symbol} {quantity} @ {price}')
+
+            # Поиск сделки по order_id
+            order_id = data.get('i')
+            trade_exists = False
+
+            if hasattr(self, 'trades'):
+                for trade in self.trades:
+                    if trade.get('buy_order_id') == order_id:
+                        trade_exists = True
+                        logger.info(f"ℹ️ Trade already exists for order {order_id}")
+                        break
+
+            if not trade_exists:
+                logger.info(f"⚠️ No existing trade found for order {order_id}")
+
+    async def _handle_expired_sell_order(self, symbol: str, order_data: dict):
+        """Обработка истекших ордеров на продажу"""
+        try:
+            order_id = order_data.get('i')
+            quantity = float(order_data.get('q', 0))
+
+            logger.info(f"🔄 Handling expired SELL order {order_id} for {symbol}")
+
+            # Уведомляем торговый сервис об истекшем ордере
+            if hasattr(self, 'trading_service') and self.trading_service:
+                # Получаем текущую рыночную цену
+                current_price = await self.trading_service._get_current_price(symbol)
+
+                # Ищем соответствующую сделку
+                if hasattr(self, 'trades'):
+                    for trade in self.trades:
+                        if trade.get('symbol', '').lower() == symbol.lower():
+                            trade_id = trade.get('trade_id')
+                            if trade_id:
+                                try:
+                                    db_trade = await Trade.objects.aget(id=trade_id)
+                                    logger.info(f"⚡ Retrying close for trade {trade_id}")
+                                    # Торговый сервис сам попробует IOC ордер
+                                    break
+                                except Trade.DoesNotExist:
+                                    continue
+
+        except Exception as e:
+            logger.error(f"❌ Error handling expired order: {e}")
 
     async def handle_new_purchase(self, symbol: str, quantity: float, price: float, trade_data: dict):
         logger.info(f'🛒 NEW PURCHASE DETECTED: {symbol} {quantity} @ {price}')
@@ -600,28 +653,29 @@ class BinanceWebsocket(object):
         except Exception as e:
             logger.error(f'Error subscribing to market data stream: {str(e)}')
 
-    async def connect(self):
+    async def _preload_symbol_info(self):
+        """Предзагрузка информации о символах"""
         try:
-            listen_key = await self.get_listen_key()
-            if not listen_key:
-                raise Exception('Failed to get listen_key')
+            async with aiohttp.ClientSession() as session:
+                url = f'{self.base_url}/exchangeInfo'
+                async with session.get(url, timeout=2) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        self.symbol_info_cache = {
+                            symbol['symbol']: symbol
+                            for symbol in data.get('symbols', [])
+                        }
+                        logger.info(f'✅ Preloaded info for {len(self.symbol_info_cache)} symbols')
+                    else:
+                        logger.warning(f'⚠️ Failed to preload symbol info: {response.status}')
+        except asyncio.TimeoutError:
+            logger.warning('⚠️ Timeout preloading symbol info')
+        except Exception as e:
+            logger.warning(f'⚠️ Could not preload symbol info: {e}')
 
-            logger.info('Connecting to Binance Websocket...')
-            self.connection = await websockets.connect(
-                f'{self.ws_url}/{listen_key}',
-                ping_interval=60,
-                ping_timeout=30
-            )
-            self.is_connected = True
-            logger.info(f'✅ Successfully connected to Binance Websocket for user {self.user_id}')
-
-            logger.info(f'Getting user balance for user {self.user_id}...')
-            await self.get_user_balance()
-
-            # Инициализируем торговый сервис
-            from .trading import TradingService
-            self.trading_service = TradingService(self)
-
+    async def _start_optimized_listeners(self):
+        """Запуск оптимизированных слушателей"""
+        try:
             # Создаем и сохраняем задачи
             user_task = asyncio.create_task(self.listen_user_data())
             keepalive_task = asyncio.create_task(self.keepalive_listen_key())
@@ -632,12 +686,79 @@ class BinanceWebsocket(object):
                 streams = '/'.join(symbols)
                 await self.subscribe_to_market_data_stream(streams)
 
-            return True
+            logger.info(f"✅ All listeners started for user {self.user_id}")
+            logger.info(f"   Active tasks: {len(self._tasks)}")
+
         except Exception as e:
-            logger.error(f'❌ Connection error: {e}')
-            if self.connection:
-                await self.connection.close()
-            raise e
+            logger.error(f"❌ Error starting listeners: {e}")
+            raise
+
+    async def connect(self):
+        """Оптимизированное соединение с минимальными задержками"""
+        start_time = time.time()
+        try:
+            # 1. Приоритетное получение listen_key
+            listen_key = await asyncio.wait_for(
+                self.get_listen_key(),
+                timeout=3.0
+            )
+            if not listen_key:
+                raise Exception('Failed to get listen_key')
+
+            # 2. Сначала получаем listen_key и синхронизируем время
+            logger.info(f'Getting listen key and syncing time...')
+            listen_key_task = asyncio.create_task(self.get_listen_key())
+            sync_time_task = asyncio.create_task(self.sync_time())
+
+            listen_key, _ = await asyncio.gather(listen_key_task, sync_time_task)
+
+            if not listen_key:
+                raise Exception('Failed to get listen_key')
+
+            # 3. Подключаемся к WebSocket
+            logger.info(f'Connecting to Binance WebSocket...')
+            ws_url = f'{self.ws_url}/{listen_key}'
+
+            try:
+                self.connection = await websockets.connect(
+                    ws_url,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=1,
+                    max_size=2 ** 20,
+                )
+            except Exception as e:
+                logger.error(f'❌ WebSocket connection error: {e}')
+                raise
+
+            self.is_connected = True
+            logger.info(f'✅ WebSocket connected in {time.time() - start_time:.2f}s')
+
+            # 4. Параллельно получаем баланс и информацию о символах
+            logger.info(f'Fetching user balance and symbol info...')
+            balance_task = asyncio.create_task(self.get_user_balance())
+            preload_task = asyncio.create_task(self._preload_symbol_info())
+
+            try:
+                await asyncio.gather(balance_task, preload_task, return_exceptions=True)
+            except Exception as e:
+                logger.warning(f'⚠️ Some tasks failed: {e}')
+
+            # 5. Инициализируем торговый сервис
+            from .trading import TradingService
+            self.trading_service = TradingService(self)
+
+            # 6. Запускаем слушателей
+            await self._start_optimized_listeners()
+
+            return True
+
+        except asyncio.TimeoutError:
+            logger.error('❌ Connection timeout')
+            return False
+        except Exception as e:
+            logger.error(f'❌ Connection error: {e}', exc_info=True)
+            raise
 
     async def disconnect(self):
         """Полное отключение от всех соединений и отмена задач"""
